@@ -33,3 +33,29 @@ Data Manipulation: pandas, openpyxl
 Email Processing: imaplib, email, bs4 (BeautifulSoup)
 
 Security: ctypes (Windows DPAPI encryption)
+
+📖 How to Use
+Email Account Details:
+
+Enter your IMAP server (e.g., imap.gmail.com).
+
+Enter your email address and your email provider's App Password (e.g., Google App Password).
+
+Email Subject: Enter the exact subject heading of the emails you want to parse (e.g., New Customer Order).
+
+Extraction Keywords:
+
+Normal Values: Comma-separated fields like Name, Email, Telephone, Date.
+
+Numerical Value: Fields requiring decimal/number formatting like Price.
+
+Excel Headings: Match or customize your Excel column names (or check "Copy from Info (Email)" to copy them automatically).
+
+Save Location: Choose your target folder and name your Excel file.
+
+Submit: Click SUBMIT to run the background thread and update your spreadsheet seamlessly!
+
+🛡️ Security Note
+This application leverages Windows DPAPI encryption to secure stored app passwords locally in your Windows user profile directory (%APPDATA%\DatabaseCollector).
+
+Never hardcode plain-text passwords or commit your settings.json file to version control.
