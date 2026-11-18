@@ -1,1 +1,684 @@
 
+
+import imaplib
+import email
+from email.header import decode_header
+import re
+import pandas as pd
+import os
+from datetime import datetime
+from bs4 import BeautifulSoup
+
+import tkinter as tk
+from tkinter import messagebox
+from tkcalendar import DateEntry
+import threading
+
+
+# ==========================================
+# 1. DEFAULT SETTINGS
+# ==========================================
+
+import sys
+
+if getattr(sys, 'frozen', False):
+    SCRIPT_DIR = os.path.dirname(sys.executable)
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# ==========================================
+# 2. EXTRACT DATA FROM EMAIL
+# ==========================================
+
+def parse_email_body(body_html_or_text):
+    soup = BeautifulSoup(body_html_or_text, 'html.parser')
+    text = soup.get_text(separator="\n")
+
+    nama, email_pelanggan, no_tel, produk, harga, kerjaya = (
+        None, None, None, None, None, None
+    )
+
+    # 1. Customer Name
+    match_nama = re.search(
+        r'Nama\s*[:\-]?\s*(.+)', text, re.IGNORECASE
+    )
+    if match_nama:
+        nama = match_nama.group(1).strip()
+
+    # 2. Customer Email
+    match_email = re.search(
+        r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+        text
+    )
+    if match_email:
+        found_email = match_email.group(1).strip()
+        if "zutherrobotics" not in found_email.lower():
+            email_pelanggan = found_email
+
+    # 3. Phone Number
+    match_tel = re.search(
+        r'(?:No\.?\s*Telefon|Phone|Tel)\s*[:\-]?\s*([\+\d\s-]+)',
+        text,
+        re.IGNORECASE
+    )
+    if match_tel:
+        no_tel = match_tel.group(1).strip()
+
+    # 4. Career
+    match_kerjaya = re.search(
+        r'Kerjaya\s*[:\-]?\s*\n?\s*(.+)',
+        text,
+        re.IGNORECASE
+    )
+    if match_kerjaya:
+        kerjaya = match_kerjaya.group(1).strip()
+
+    # 5. Extract Total Price
+    cells = soup.find_all(['td', 'th'])
+
+    for idx, cell in enumerate(cells):
+        cell_text = cell.get_text().strip().upper()
+
+        if 'JUMLAH KESELURUHAN' in cell_text:
+            for next_idx in range(
+                idx + 1, min(idx + 5, len(cells))
+            ):
+                val_text = cells[next_idx].get_text().strip()
+                match_val = re.search(
+                    r'(\d+[\.\,]\d{2})', val_text
+                )
+
+                if match_val:
+                    harga = match_val.group(1).replace(',', '.')
+                    break
+
+            if harga:
+                break
+
+    if not harga:
+        match_harga = re.search(
+            r'JUMLAH\s*KESELURUHAN[^\d]*(\d+[\.\,]\d{2})',
+            text,
+            re.IGNORECASE
+        )
+        if match_harga:
+            harga = match_harga.group(1).replace(',', '.')
+
+    if not harga:
+        match_subtotal = re.search(
+            r'(?:Jumlah|Sub\s*Jumlah)[^\d]*(\d+[\.\,]\d{2})',
+            text,
+            re.IGNORECASE
+        )
+        if match_subtotal:
+            harga = match_subtotal.group(1).replace(',', '.')
+
+    # 6. Extract Product
+    match_borang = re.search(
+        r'borang\s+(.*?)\s*,\s*bernombor',
+        text,
+        re.IGNORECASE
+    )
+
+    if match_borang:
+        produk = match_borang.group(1).strip()
+
+    else:
+        match_ebook = re.search(r'(\[.+\][^\n]+)', text)
+
+        if match_ebook:
+            produk = match_ebook.group(1).strip()
+
+        else:
+            td_tags = soup.find_all(['td', 'th'])
+
+            for idx, td in enumerate(td_tags):
+                td_text = td.get_text().strip()
+
+                if td_text.lower() == 'produk' and (idx + 4) < len(td_tags):
+                    candidate = td_tags[idx + 4].get_text().strip()
+
+                    if candidate and candidate.lower() != 'harga (rm)':
+                        produk = candidate
+                        break
+
+    return nama, email_pelanggan, no_tel, produk, harga, kerjaya
+
+
+# ==========================================
+# 3. CONNECT TO EMAIL AND FETCH DATA
+# ==========================================
+
+def fetch_order_emails(imap_server, email_user, email_pass):
+
+    print("1. Connecting to Gmail...")
+
+    mail = imaplib.IMAP4_SSL(imap_server)
+    mail.login(email_user, email_pass)
+    mail.select("inbox")
+
+    print("2. Searching for order emails...")
+
+    status, messages = mail.search(
+        None, '(SUBJECT "Salinan Tempahan:")'
+    )
+
+    email_ids = messages[0].split()
+
+    print(f"Found {len(email_ids)} matching emails.")
+
+    extracted_data = []
+
+    try:
+        for e_id in email_ids:
+
+            _, msg_data = mail.fetch(e_id, '(RFC822)')
+
+            body = ""
+
+            for response_part in msg_data:
+
+                if isinstance(response_part, tuple):
+
+                    msg = email.message_from_bytes(response_part[1])
+
+                    if msg.is_multipart():
+
+                        for part in msg.walk():
+
+                            content_type = part.get_content_type()
+
+                            if content_type == 'text/html':
+                                body = part.get_payload(
+                                    decode=True
+                                ).decode(errors='ignore')
+                                break
+
+                            elif content_type == 'text/plain' and not body:
+                                body = part.get_payload(
+                                    decode=True
+                                ).decode(errors='ignore')
+
+                    else:
+                        body = msg.get_payload(
+                            decode=True
+                        ).decode(errors='ignore')
+
+            if body:
+
+                nama, email_pelanggan, no_tel, produk, harga, kerjaya = (
+                    parse_email_body(body)
+                )
+
+                tarikh_diterima = datetime.now().strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+
+                if nama or email_pelanggan or no_tel:
+
+                    extracted_data.append({
+
+                        "Tarikh Tempahan": tarikh_diterima,
+                        "Nama": nama if nama else "-",
+                        "Emel": email_pelanggan if email_pelanggan else "-",
+                        "No. Telefon": no_tel if no_tel else "-",
+                        "Produk": produk if produk else "-",
+                        "Harga (RM)": harga if harga else "0.00",
+                        "Kerjaya": kerjaya if kerjaya else "-",
+                        "Status Verification": "Direct Payment"
+
+                    })
+
+    finally:
+        mail.logout()
+
+    return extracted_data
+
+
+# ==========================================
+# 4. SAVE DATA TO EXCEL
+# ==========================================
+
+def save_to_excel(new_data, excel_file):
+
+    if not new_data:
+        print("[WARNING] No data extracted.")
+        return 0
+
+    df_new = pd.DataFrame(new_data)
+
+    jumlah_ditemui = len(df_new)
+
+    df_new.drop_duplicates(
+        subset=[
+            "Nama",
+            "Emel",
+            "No. Telefon",
+            "Tarikh Tempahan"
+        ],
+        keep="first",
+        inplace=True
+    )
+
+    if os.path.exists(excel_file):
+
+        df_existing = pd.read_excel(excel_file)
+
+        df_combined = pd.concat(
+            [df_existing, df_new],
+            ignore_index=True
+        )
+
+        df_combined.drop_duplicates(
+            subset=[
+                "Nama",
+                "Emel",
+                "No. Telefon",
+                "Produk"
+            ],
+            keep="first",
+            inplace=True
+        )
+
+        df_combined.to_excel(excel_file, index=False)
+
+        print(f"Successfully processed {jumlah_ditemui} emails!")
+        print(f"Total Excel records: {len(df_combined)}")
+
+        return len(df_combined)
+
+    else:
+
+        df_new.to_excel(excel_file, index=False)
+
+        print(
+            f"New Excel file created with {len(df_new)} records!"
+        )
+
+        return len(df_new)
+
+
+# ==========================================
+# 5. GUI FUNCTIONS
+# ==========================================
+
+def copy_email_info():
+
+    if copy_var.get():
+
+        # Copy Price
+        price_excel.delete(0, tk.END)
+        price_excel.insert(0, price_email.get())
+
+        # Copy Date
+        date_excel.set_date(date_email.get_date())
+
+
+def start_process():
+
+    imap_server = imap_entry.get().strip()
+    email_user = email_entry.get().strip()
+    email_pass = password_entry.get().strip()
+
+    excel_name = filename_entry.get().strip()
+
+    if not imap_server or not email_user or not email_pass:
+        messagebox.showwarning(
+            "Missing Information",
+            "Please fill in IMAP Server, Email and Email Passkey."
+        )
+        return
+
+    if not excel_name:
+        messagebox.showwarning(
+            "Missing Information",
+            "Please enter an Excel file name."
+        )
+        return
+
+    # Automatically add .xlsx if not provided
+    if not excel_name.lower().endswith(".xlsx"):
+        excel_name += ".xlsx"
+
+    # Prevent saving outside the script directory
+    if os.path.basename(excel_name) != excel_name:
+        messagebox.showwarning(
+            "Invalid File Name",
+            "Please enter only the Excel file name, without a folder path."
+        )
+        return
+
+    excel_file = os.path.join(SCRIPT_DIR, excel_name)
+
+    start_button.config(state="disabled")
+    status_label.config(text="Connecting to email...")
+
+    def process():
+
+        try:
+
+            data = fetch_order_emails(
+                imap_server,
+                email_user,
+                email_pass
+            )
+
+            total = save_to_excel(data, excel_file)
+
+            def success():
+
+                status_label.config(
+                    text="Process completed successfully!"
+                )
+
+                messagebox.showinfo(
+                    "Success",
+                    f"Email extraction completed!\n\n"
+                    f"Emails processed: {len(data)}\n"
+                    f"Total Excel records: {total}\n\n"
+                    f"Saved to:\n{excel_file}"
+                )
+
+            root.after(0, success)
+
+        except Exception as e:
+
+            def show_error():
+
+                status_label.config(text="Process failed.")
+
+                messagebox.showerror(
+                    "Error",
+                    str(e)
+                )
+
+            root.after(0, show_error)
+
+        finally:
+
+            root.after(
+                0,
+                lambda: start_button.config(state="normal")
+            )
+
+    threading.Thread(
+        target=process,
+        daemon=True
+    ).start()
+
+
+# ==========================================
+# 6. TKINTER GUI DESIGN
+# ==========================================
+
+root = tk.Tk()
+
+root.title("Database Collector")
+root.geometry("750x540")
+root.resizable(False, False)
+
+
+# Main container - left aligned
+main_frame = tk.Frame(root, padx=20, pady=15)
+main_frame.pack(fill="both", expand=True, anchor="nw")
+
+
+# ------------------------------------------
+# TITLE
+# ------------------------------------------
+
+title_label = tk.Label(
+    main_frame,
+    text="DATABASE COLLECTOR",
+    font=("Arial", 20, "bold")
+)
+
+title_label.pack(anchor="w", pady=(0, 20))
+
+
+# ------------------------------------------
+# EMAIL ACCOUNT INFORMATION
+# ------------------------------------------
+
+account_frame = tk.LabelFrame(
+    main_frame,
+    text="Email Account",
+    font=("Arial", 10, "bold"),
+    padx=10,
+    pady=10
+)
+
+account_frame.pack(fill="x", pady=5)
+
+account_frame.columnconfigure(0, weight=1)
+account_frame.columnconfigure(1, weight=1)
+account_frame.columnconfigure(2, weight=1)
+
+
+# IMAP Server
+tk.Label(
+    account_frame,
+    text="IMAP Server"
+).grid(row=0, column=0, sticky="w", padx=5)
+
+imap_entry = tk.Entry(
+    account_frame,
+    width=25
+)
+
+imap_entry.grid(row=1, column=0, sticky="ew", padx=5)
+imap_entry.insert(0, "imap.gmail.com")
+
+
+# Email
+tk.Label(
+    account_frame,
+    text="Email"
+).grid(row=0, column=1, sticky="w", padx=5)
+
+email_entry = tk.Entry(
+    account_frame,
+    width=25
+)
+
+email_entry.grid(row=1, column=1, sticky="ew", padx=5)
+
+
+# Email Password
+tk.Label(
+    account_frame,
+    text="Email Passkey"
+).grid(row=0, column=2, sticky="w", padx=5)
+
+password_entry = tk.Entry(
+    account_frame,
+    width=25,
+    show="*"
+)
+
+password_entry.grid(row=1, column=2, sticky="ew", padx=5)
+
+
+# ------------------------------------------
+# INFO (EMAIL)
+# ------------------------------------------
+
+info_email_frame = tk.LabelFrame(
+    main_frame,
+    text="Info (Email)",
+    font=("Arial", 10, "bold"),
+    padx=10,
+    pady=10
+)
+
+info_email_frame.pack(
+    side="top",
+    anchor="nw",
+    fill="none",
+    pady=8
+)
+
+
+# Price
+tk.Label(
+    info_email_frame,
+    text="Price (RM)"
+).grid(row=0, column=0, sticky="w", padx=5)
+
+price_email = tk.Entry(
+    info_email_frame,
+    width=18
+)
+
+price_email.grid(row=1, column=0, sticky="w", padx=5)
+
+
+# Date
+tk.Label(
+    info_email_frame,
+    text="Date"
+).grid(row=0, column=1, sticky="w", padx=5)
+
+date_email = DateEntry(
+    info_email_frame,
+    width=16,
+    date_pattern="dd/mm/yyyy",
+    background="darkblue",
+    foreground="white",
+    borderwidth=2
+)
+
+date_email.grid(row=1, column=1, sticky="w", padx=5)
+
+
+# ------------------------------------------
+# INFO (EXCEL)
+# ------------------------------------------
+
+info_excel_frame = tk.LabelFrame(
+    main_frame,
+    text="Info (Excel)",
+    font=("Arial", 10, "bold"),
+    padx=10,
+    pady=10
+)
+
+info_excel_frame.pack(
+    side="top",
+    anchor="nw",
+    fill="none",
+    pady=8
+)
+
+
+# Checkbox
+copy_var = tk.BooleanVar(value=False)
+
+copy_checkbox = tk.Checkbutton(
+    info_excel_frame,
+    text="Copy from Info (Email)",
+    variable=copy_var,
+    command=copy_email_info
+)
+
+copy_checkbox.grid(
+    row=0,
+    column=0,
+    sticky="w",
+    padx=5,
+    rowspan=2
+)
+
+
+# Excel Price
+tk.Label(
+    info_excel_frame,
+    text="Price (RM)"
+).grid(row=0, column=1, sticky="w", padx=5)
+
+price_excel = tk.Entry(
+    info_excel_frame,
+    width=18
+)
+
+price_excel.grid(row=1, column=1, sticky="w", padx=5)
+
+
+# Excel Date
+tk.Label(
+    info_excel_frame,
+    text="Date"
+).grid(row=0, column=2, sticky="w", padx=5)
+
+date_excel = DateEntry(
+    info_excel_frame,
+    width=16,
+    date_pattern="dd/mm/yyyy",
+    background="darkblue",
+    foreground="white",
+    borderwidth=2
+)
+
+date_excel.grid(row=1, column=2, sticky="w", padx=5)
+
+
+# ------------------------------------------
+# EXCEL FILE NAME
+# ------------------------------------------
+
+filename_frame = tk.LabelFrame(
+    main_frame,
+    text="File Name (.xlsx)",
+    font=("Arial", 10, "bold"),
+    padx=10,
+    pady=10
+)
+
+filename_frame.pack(fill="x", pady=8, anchor="w")
+
+filename_entry = tk.Entry(
+    filename_frame,
+    width=40
+)
+
+filename_entry.pack(anchor="w", padx=5)
+
+filename_entry.insert(0, "Pelanggan.xlsx")
+
+
+# ------------------------------------------
+# ENTER BUTTON
+# ------------------------------------------
+
+start_button = tk.Button(
+    main_frame,
+    text="ENTER",
+    font=("Arial", 11, "bold"),
+    width=20,
+    height=2,
+    command=start_process
+)
+
+start_button.pack(anchor="w", pady=15)
+
+
+# ------------------------------------------
+# STATUS
+# ------------------------------------------
+
+status_label = tk.Label(
+    main_frame,
+    text="Waiting for input...",
+    font=("Arial", 9),
+    fg="blue"
+)
+
+status_label.pack(anchor="w")
+
+
+# ==========================================
+# RUN GUI
+# ==========================================
+
+root.mainloop()
